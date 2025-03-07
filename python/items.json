@@ -1,0 +1,14 @@
+{
+    "items": [
+        {
+            "name": "pen",
+            "category": "stationaries",
+            "image_name": "default.jpg"
+        },
+        {
+            "name": "pencil",
+            "category": "stationaries",
+            "image_name": "default.jpg"
+        }
+    ]
+}
