@@ -1,47 +1,66 @@
 import os
 import logging
 import pathlib
-import json #4-2(json)
 import hashlib  # ハッシュ化のために追加(4-4)
 import shutil   # 画像の保存に使う(4-4)
-
-from fastapi import FastAPI, Form, HTTPException, Depends, UploadFile, File #画像を受け取る
+import sqlite3
+from fastapi import FastAPI, Form, HTTPException, Depends, UploadFile, File, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-import sqlite3
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
+from typing import Optional
+
+shared_connection = None
 
 # Define the path to the images & sqlite3 database
 images = pathlib.Path(__file__).parent.resolve() / "images" 
 db = pathlib.Path(__file__).parent.resolve() / "db" / "mercari.sqlite3"
-json_path = pathlib.Path(__file__).parent.resolve() / "items.json" # 4-2 ここから追加 
-
-# 4-2 JSONファイルがなければ作成(最初に1回だけ実行)
-if not json_path.exists():
-    with open(json_path, "w") as file:
-        json.dump([], file)
 
 def get_db():
-    if not db.exists():
-        yield
+    from __main__ import shared_connection  # ←★追加（main_testと共有）
 
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+    if shared_connection is not None:
+        yield shared_connection
+        return
+
+    if not db.exists():
+        setup_database()
+
+    conn = sqlite3.connect(db, check_same_thread=False)
+    conn.row_factory = sqlite3.Row  
     try:
         yield conn
     finally:
         conn.close()
 
 
-# STEP 5-1: set up the database connection
 def setup_database():
-    pass
+    conn = sqlite3.connect(db)
+    cursor = conn.cursor()
+
+    # データベースファイル (mercari.sqlite3) がない場合、エラーを出す
+    if not db.exists():
+        raise FileNotFoundError("Error: mercari.sqlite3 が見つかりません")
+
+    # itemsテーブルがあるかチェック
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='items'")
+    table_exists = cursor.fetchone()
+
+    # itemsテーブルがなかったらエラーを出す
+    if not table_exists:
+        raise RuntimeError("Error: 'items'テーブルが見つかりません")
+
+    conn.close()
+
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    setup_database()
+    import __main__  
+
+    if __main__.shared_connection is None:
+        setup_database()
     yield
 
 
@@ -78,7 +97,7 @@ class AddItemResponse(BaseModel):
 async def add_item(
     name: str = Form(...),
     category: str = Form(...),
-    image: UploadFile = File(None),  # 画像を受け取る
+    image: UploadFile = File(None),
     db: sqlite3.Connection = Depends(get_db),
 ):
     if not name:
@@ -87,55 +106,75 @@ async def add_item(
     if not category:
         raise HTTPException(status_code=400, detail="category is required")
 
-    if not images.exists(): # 画像
+    if not images.exists():
         images.mkdir()
 
-    image_filename = "default.jpg"  # 画像がない場合はdefault.jpg
+    image_filename = "default.jpg"
 
+    try:
+        if image:
+            image_data = await image.read()
+            hash_name = hashlib.sha256(image_data).hexdigest()
+            image_filename = f"{hash_name}.jpg"
+            image_path = images / image_filename
 
-    if image:
-        # 画像のデータを取得して SHA-256 でハッシュ化
-        image_data = await image.read()
-        hash_name = hashlib.sha256(image_data).hexdigest()
-        image_filename = f"{hash_name}.jpg"  # .jpg を付ける
-        image_path = images / image_filename
+            with open(image_path, "wb") as buffer:
+                buffer.write(image_data)
 
-        # 画像を保存
-        with open(image_path, "wb") as buffer:
-            buffer.write(image_data)
+        category_query = "SELECT id FROM categories WHERE name = ?"
+        category_id_row = db.execute(category_query, (category,)).fetchone()
 
-    # アイテムを追加
-    insert_item(Item(name=name, category=category, image_name=image_filename))
+        if category_id_row is None:
+            db.execute("INSERT INTO categories (name) VALUES (?)", (category,))
+            db.commit()
+            category_id_row = db.execute(category_query, (category,)).fetchone()
 
-    return AddItemResponse(**{"message": f"item received: {name}, category: {category}, image_name: {image_filename}"})
+        if category_id_row is None:
+            raise HTTPException(status_code=500, detail="Failed to get category_id after insertion")
 
-# 4-3 GET/itemsエンドポイント実装
+        category_id = category_id_row["id"]
+
+        query = "INSERT INTO items (name, category_id, image_name) VALUES (?, ?, ?)"
+        db.execute(query, (name, category_id, image_filename))
+        db.commit()
+
+        return AddItemResponse(message=f"item received: {name}, category: {category}, image_name: {image_filename}")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+    
+
 @app.get("/items")
-def get_items():
-    with open(json_path, "r") as file:
-        try:
-            data = json.load(file)
-        except json.JSONDecodeError:
-            data = {"items": []} # データが壊れていた場合の初期化
-    return data
+def get_items(db: sqlite3.Connection = Depends(get_db)):
+    query = """
+        SELECT items.id, items.name, categories.name AS category, items.image_name
+        FROM items
+        JOIN categories ON items.category_id = categories.id
+    """
+    items = db.execute(query).fetchall()
+    return {"items": [dict(item) for item in items]}
+
 
 @app.get("/items/{item_id}")
-def get_item(item_id: int):
-    with open(json_path, "r") as file:
-        try:
-            data = json.load(file)
-        except json.JSONDecodeError:
-            data = {"items": []}
-    
-    # アイテム一覧を取得
-    items = data.get("items", [])
+def get_item_by_id(item_id: int, db: sqlite3.Connection = Depends(get_db)):
+    item = db.execute("SELECT * FROM items WHERE id =?", (item_id,)).fetchone()
 
-    # IDが範囲外ならエラーを返す
-    if item_id < 0 or item_id >= len(items):
-        raise HTTPException(status_code=404, detail="Item not found")
-    
-    # 該当のアイテムを返す
-    return items[item_id]
+    if item is None:
+        raise HTTPException(status_code=404, detail ="Item not found")
+    return dict(item)
+
+# 5-2追加部分
+@app.get("/search")
+def search_items(keyword: str = Query(...), db: sqlite3.Connection = Depends(get_db)):
+    query = """
+        SELECT items.name, categories.name AS category, items.image_name
+        FROM items
+        JOIN categories ON items.category_id = categories.id
+        WHERE items.name LIKE ?
+    """
+    items = db.execute(query, (f"%{keyword}%",)).fetchall()
+
+    return {"items": [dict(item) for item in items]}
 
 
 # get_image is a handler to return an image for GET /images/{filename} .
@@ -154,24 +193,21 @@ async def get_image(image_name):
     return FileResponse(image)
 
 
+
 class Item(BaseModel):
     name: str
     category: str
-    image_name: str | None = None  # 画像のファイル名を保存
+    image_name: Optional[str] = None  # 画像のファイル名を保存
 
-def insert_item(item: Item):
-    # STEP 4-2: add an implementation to store an item
-    with open(json_path, "r") as file:
-        try:
-            data = json.load(file)
-            # もし data がリストだったら、辞書に変換
-            if not isinstance(data, dict):  
-                data = {"items": []}
-        except json.JSONDecodeError:  # もし JSON が壊れていたら初期化
-            data = {"items": []}
-    #新しいアイテムを追加
-    data["items"].append({"name": item.name, "category": item.category, "image_name": item.image_name})
-    #上書き保存("w"を使用)
-    with open(json_path, "w") as file:
-        json.dump(data, file, indent=4)
+def insert_item_db(item: Item, db: sqlite3.Connection) -> int:
+    cursor = db.cursor()
+    query = """
+        INSERT INTO items (name, category, image_name) VALUES (?, ?, ?);
+        """
+    cursor.execute(query, (item.name, item.category, item.image_name))
+
+    db.commit()
+    last_id = cursor.lastrowid
+    cursor.close()
+    return last_id
 
