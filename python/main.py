@@ -4,20 +4,28 @@ import pathlib
 import hashlib  # ハッシュ化のために追加(4-4)
 import shutil   # 画像の保存に使う(4-4)
 import sqlite3
-from fastapi import FastAPI, Form, HTTPException, Depends, UploadFile, File, Query
+from fastapi import FastAPI, Form, HTTPException, Depends, UploadFile, File, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from typing import Optional
 
+shared_connection = None
+
 # Define the path to the images & sqlite3 database
 images = pathlib.Path(__file__).parent.resolve() / "images" 
 db = pathlib.Path(__file__).parent.resolve() / "db" / "mercari.sqlite3"
 
 def get_db():
+    from __main__ import shared_connection  # ←★追加（main_testと共有）
+
+    if shared_connection is not None:
+        yield shared_connection
+        return
+
     if not db.exists():
-        setup_database()  # データベースがない場合は作成する
+        setup_database()
 
     conn = sqlite3.connect(db, check_same_thread=False)
     conn.row_factory = sqlite3.Row  
@@ -49,7 +57,10 @@ def setup_database():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    setup_database()
+    import __main__  
+
+    if __main__.shared_connection is None:
+        setup_database()
     yield
 
 
@@ -100,34 +111,37 @@ async def add_item(
 
     image_filename = "default.jpg"
 
-    if image:
-        # 画像のデータを取得して SHA-256 でハッシュ化
-        image_data = await image.read()
-        hash_name = hashlib.sha256(image_data).hexdigest()
-        image_filename = f"{hash_name}.jpg"
-        image_path = images / image_filename
+    try:
+        if image:
+            image_data = await image.read()
+            hash_name = hashlib.sha256(image_data).hexdigest()
+            image_filename = f"{hash_name}.jpg"
+            image_path = images / image_filename
 
-        # 画像を保存
-        with open(image_path, "wb") as buffer:
-            buffer.write(image_data)
+            with open(image_path, "wb") as buffer:
+                buffer.write(image_data)
 
-    # 🔽 `category_id` を取得（なければ作成）
-    category_query = "SELECT id FROM categories WHERE name = ?"
-    category_id = db.execute(category_query, (category,)).fetchone()
+        category_query = "SELECT id FROM categories WHERE name = ?"
+        category_id_row = db.execute(category_query, (category,)).fetchone()
 
-    if category_id is None:
-        db.execute("INSERT INTO categories (name) VALUES (?)", (category,))
+        if category_id_row is None:
+            db.execute("INSERT INTO categories (name) VALUES (?)", (category,))
+            db.commit()
+            category_id_row = db.execute(category_query, (category,)).fetchone()
+
+        if category_id_row is None:
+            raise HTTPException(status_code=500, detail="Failed to get category_id after insertion")
+
+        category_id = category_id_row["id"]
+
+        query = "INSERT INTO items (name, category_id, image_name) VALUES (?, ?, ?)"
+        db.execute(query, (name, category_id, image_filename))
         db.commit()
-        category_id = db.execute(category_query, (category,)).fetchone()
 
-    category_id = category_id["id"]  # `fetchone()` の結果から `id` を取得
+        return AddItemResponse(message=f"item received: {name}, category: {category}, image_name: {image_filename}")
 
-    # 🔽 `items` テーブルに `category_id` を登録
-    query = "INSERT INTO items (name, category_id, image_name) VALUES (?, ?, ?)"
-    db.execute(query, (name, category_id, image_filename))
-    db.commit()
-
-    return AddItemResponse(message=f"item received: {name}, category: {category}, image_name: {image_filename}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
     
 
 @app.get("/items")
