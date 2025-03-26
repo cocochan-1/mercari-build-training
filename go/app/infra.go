@@ -12,6 +12,7 @@ var errImageNotFound = errors.New("image not found")
 type Item struct {
 	ID   int    `db:"id" json:"-"`
 	Name string `db:"name" json:"name"`
+	Category string `db:"category" json:"category"`
 }
 
 // Please run `go generate ./...` to generate the mock implementation
@@ -36,7 +37,7 @@ func NewItemRepository() ItemRepository {
 // Insert inserts an item into the repository.
 func (i *itemRepository) Insert(ctx context.Context, item *Item) error {
 	// STEP 4-1: add an implementation to store an item
-
+	
 	return nil
 }
 
