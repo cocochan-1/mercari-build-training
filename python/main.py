@@ -10,15 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from typing import Optional
-
-shared_connection = None
+from db_connection import shared_connection
 
 # Define the path to the images & sqlite3 database
 images = pathlib.Path(__file__).parent.resolve() / "images" 
 db = pathlib.Path(__file__).parent.resolve() / "db" / "mercari.sqlite3"
 
 def get_db():
-    from __main__ import shared_connection  # ←★追加（main_testと共有）
+    from db_connection import shared_connection  # ←★追加（main_testと共有）
 
     if shared_connection is not None:
         yield shared_connection
@@ -39,27 +38,43 @@ def setup_database():
     conn = sqlite3.connect(db)
     cursor = conn.cursor()
 
-    # データベースファイル (mercari.sqlite3) がない場合、エラーを出す
     if not db.exists():
         raise FileNotFoundError("Error: mercari.sqlite3 が見つかりません")
 
-    # itemsテーブルがあるかチェック
+    # categoriesテーブルがなければ作成
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='categories'")
+    categories_exists = cursor.fetchone()
+    if not categories_exists:
+        cursor.execute("""
+            CREATE TABLE categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL
+            )
+        """)
+        # 初期カテゴリ追加（例：fashion）
+        cursor.execute("INSERT INTO categories (name) VALUES (?)", ("fashion",))
+
+    # itemsテーブルがなければ作成
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='items'")
-    table_exists = cursor.fetchone()
+    items_exists = cursor.fetchone()
+    if not items_exists:
+        cursor.execute("""
+            CREATE TABLE items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                category_id INTEGER,
+                image_name TEXT,
+                FOREIGN KEY (category_id) REFERENCES categories(id)
+            )
+        """)
 
-    # itemsテーブルがなかったらエラーを出す
-    if not table_exists:
-        raise RuntimeError("Error: 'items'テーブルが見つかりません")
-
+    conn.commit()
     conn.close()
-
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import __main__  
-
-    if __main__.shared_connection is None:
+    if shared_connection is None:
         setup_database()
     yield
 
