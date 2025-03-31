@@ -4,7 +4,7 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir fastapi uvicorn python-multipart
 
-COPY python/ /app
+COPY . /app
 
 EXPOSE 9000
 
