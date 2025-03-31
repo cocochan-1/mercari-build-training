@@ -1,3 +1,5 @@
+# Step7の変更をmainにマージした後PR作成するのを忘れたのでPR作成用にこの文を追加しました
+
 import os
 import logging
 import pathlib
