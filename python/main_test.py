@@ -7,11 +7,11 @@ import pathlib
 from unittest.mock import MagicMock  # STEP 6-3
 from main import get_db, app         # STEP 6-3
 from fastapi.testclient import TestClient  # STEP 6-3
+from db_connection import shared_connection
 
 # STEP 6-4: uncomment this test setup
 test_db = pathlib.Path(__file__).parent.resolve() / "db" / "test_mercari.sqlite3"
 
-shared_connection = None
 
 def override_get_db():
     global shared_connection

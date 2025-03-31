@@ -1,8 +1,11 @@
-FROM alpine
+FROM python:3.10-slim
 
-RUN addgroup -S mercari && adduser -S trainee -G mercari
-# RUN chown -R trainee:mercari /path/to/db
+WORKDIR /app
 
-USER trainee
+RUN pip install --no-cache-dir fastapi uvicorn python-multipart
 
-CMD ["python", "-V"]
+COPY python/ /app
+
+EXPOSE 9000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9000"]
